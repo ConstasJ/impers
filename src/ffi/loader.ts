@@ -32,12 +32,32 @@ const IMPERSONATE_SEARCH_PATHS: Record<string, string[]> = {
 };
 
 /**
- * Default libcurl library names per platform
+ * Default system libcurl candidates per platform.
+ * Prefer runtime sonames before development symlinks because CI images often
+ * ship libcurl at a versioned path only (for example libcurl.so.4).
  */
-const DEFAULT_LIBCURL: Record<string, string> = {
-  darwin: "libcurl.dylib",
-  linux: "libcurl.so",
-  win32: "libcurl.dll",
+const DEFAULT_LIBCURL_CANDIDATES: Record<string, string[]> = {
+  darwin: ["libcurl.4.dylib", "libcurl.dylib"],
+  linux: ["libcurl.so.4", "libcurl.so"],
+  win32: ["libcurl.dll", "libcurl-x64.dll", "libcurl-x86.dll"],
+};
+
+const SYSTEM_LIBCURL_SEARCH_PATHS: Record<string, string[]> = {
+  darwin: [
+    "/usr/lib",
+    "/usr/local/lib",
+    "/opt/homebrew/lib",
+    "/opt/local/lib",
+  ],
+  linux: [
+    "/usr/local/lib",
+    "/usr/local/lib64",
+    "/usr/lib",
+    "/usr/lib64",
+    "/lib",
+    "/lib64",
+  ],
+  win32: [],
 };
 
 const LIB_PREFIX = "libcurl-impersonate";
@@ -84,6 +104,97 @@ function getCacheRoot(): string | null {
 
 function getCacheDir(cacheRoot: string, platform: string, arch: string): string {
   return join(cacheRoot, `${platform}-${arch}`);
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return [...new Set(paths.filter(Boolean))];
+}
+
+function splitEnvPaths(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+  return value.split(process.platform === "win32" ? ";" : ":").filter(Boolean);
+}
+
+function getSystemSearchPaths(platform: string, arch: string): string[] {
+  const paths = [...(SYSTEM_LIBCURL_SEARCH_PATHS[platform] || [])];
+
+  if (platform === "linux") {
+    const archDirs = arch === "x64"
+      ? ["/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu"]
+      : arch === "arm64"
+      ? ["/usr/lib/aarch64-linux-gnu", "/lib/aarch64-linux-gnu"]
+      : [];
+    paths.unshift(...archDirs);
+    paths.unshift(...splitEnvPaths(process.env.LD_LIBRARY_PATH));
+  } else if (platform === "darwin") {
+    paths.unshift(...splitEnvPaths(process.env.DYLD_LIBRARY_PATH));
+    paths.unshift(...splitEnvPaths(process.env.LD_LIBRARY_PATH));
+  } else if (platform === "win32") {
+    paths.unshift(...splitEnvPaths(process.env.PATH));
+  }
+
+  return uniquePaths(paths);
+}
+
+function findLibraryInPaths(paths: string[], candidates: string[]): string | null {
+  for (const dir of paths) {
+    for (const candidate of candidates) {
+      const fullPath = join(dir, candidate);
+      if (isNonEmptyFile(fullPath)) {
+        return fullPath;
+      }
+    }
+  }
+  return null;
+}
+
+function findVersionedSystemLibrary(paths: string[], platform: string): string | null {
+  const libExt = PLATFORM_LIB_EXT[platform] || ".so";
+  const matches: string[] = [];
+
+  for (const dir of paths) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!isLibName(entry, "libcurl", libExt) || entry.includes("impersonate")) {
+        continue;
+      }
+
+      const fullPath = join(dir, entry);
+      if (isNonEmptyFile(fullPath)) {
+        matches.push(fullPath);
+      }
+    }
+  }
+
+  if (matches.length === 0) {
+    return null;
+  }
+
+  matches.sort((a, b) => basename(a).length - basename(b).length);
+  return matches[0] || null;
+}
+
+function findSystemLibrary(platform: string, arch: string): string {
+  const candidates = DEFAULT_LIBCURL_CANDIDATES[platform] || ["libcurl.so.4", "libcurl.so"];
+  const searchPaths = getSystemSearchPaths(platform, arch);
+
+  const discovered = findLibraryInPaths(searchPaths, candidates)
+    || findVersionedSystemLibrary(searchPaths, platform);
+  if (discovered) {
+    return discovered;
+  }
+
+  // Fall back to a likely runtime soname so the dynamic linker still has a
+  // chance to resolve it if it is on the default loader path.
+  return candidates[0];
 }
 
 function collectLibraryCandidates(rootDir: string, libExt: string): string[] {
@@ -540,8 +651,8 @@ export async function resolveLibrary(): Promise<LibraryInfo> {
     };
   }
 
-  // Priority 4: System libcurl
-  const defaultLib = DEFAULT_LIBCURL[platform] || "libcurl.so";
+  // Priority 5: System libcurl
+  const defaultLib = findSystemLibrary(platform, arch);
   return {
     path: defaultLib,
     isImpersonate: false,

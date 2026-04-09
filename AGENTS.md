@@ -15,6 +15,11 @@ This repository contains `impers`, a Node.js + TypeScript library that wraps lib
 - `npm run test:watch`: Re-run tests in watch mode during development.
 
 ## Coding Style & Naming Conventions
+
+Spritually, the API should be both nodejs native and similar to the sibling python project `curl-cffi`, which you can find in `../curl_cffi`.
+
+However, the API should not be a one-to-one mapping to anything.
+
 - TypeScript with ESM (`"type": "module"`); follow the existing import style and `NodeNext` module resolution.
 - Use 2-space indentation, double quotes for strings, and semicolons, matching the current files.
 - File names are lowercase and descriptive (`request.ts`, `websocket.ts`). Tests end with `.test.ts`.
