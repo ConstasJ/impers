@@ -4,17 +4,6 @@
 import koffi from "koffi";
 import { resolveLibcurlPath } from "impers";
 
-const lib = koffi.load(resolveLibcurlPath());
-
-// Define functions
-const curl_easy_init = lib.func("void * curl_easy_init()");
-const curl_easy_cleanup = lib.func("void curl_easy_cleanup(void *)");
-const curl_easy_setopt = lib.func("int curl_easy_setopt(void *, int, ...)");
-const curl_easy_perform = lib.func("int curl_easy_perform(void *)");
-const curl_easy_strerror = lib.func("const char * curl_easy_strerror(int)");
-const curl_ws_send = lib.func("int curl_ws_send(void *, void *, size_t, size_t *, int64, uint32)");
-const curl_ws_recv = lib.func("int curl_ws_recv(void *, void *, size_t, size_t *, void **)");
-
 // Constants
 const CURLOPT_URL = 10002;
 const CURLOPT_CONNECT_ONLY = 141;
@@ -24,6 +13,17 @@ const CURLWS_TEXT = 1;
 const port = process.argv[2] || "8765";
 
 async function main() {
+  const lib = koffi.load(await resolveLibcurlPath());
+
+  // Define functions
+  const curl_easy_init = lib.func("void * curl_easy_init()");
+  const curl_easy_cleanup = lib.func("void curl_easy_cleanup(void *)");
+  const curl_easy_setopt = lib.func("int curl_easy_setopt(void *, int, ...)");
+  const curl_easy_perform = lib.func("int curl_easy_perform(void *)");
+  const curl_easy_strerror = lib.func("const char * curl_easy_strerror(int)");
+  const curl_ws_send = lib.func("int curl_ws_send(void *, void *, size_t, size_t *, int64, uint32)");
+  const curl_ws_recv = lib.func("int curl_ws_recv(void *, void *, size_t, size_t *, void **)");
+
   const handle = curl_easy_init();
   console.log("Handle:", handle);
 
@@ -53,7 +53,7 @@ async function main() {
 
     if (sendCode === 0) {
       // Wait a bit for response
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 100));
 
       console.log("\nReceiving...");
       const recvBuffer = Buffer.alloc(1024);

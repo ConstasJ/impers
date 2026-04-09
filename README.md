@@ -33,7 +33,7 @@ Node.js 18+ is required.
 - [curl-impersonate](https://github.com/lexiforest/curl-impersonate). A curl distribution that impersonates browsers.
 - [curl_cffi](https://github.com/lexiforest/curl_cffi). Python binding to curl-impersonate.
 - [impers](https://github.com/lexiforest/impers). Node.js binding to curl-impersonate.
-- [impersonate.pro](https://impersonate.pro). Commercial support, more fingerprints and vibe crawling.
+- [impersonate.pro](https://impersonate.pro). Commercial support, more fingerprints and integrated solutions.
 
 ## Install
 

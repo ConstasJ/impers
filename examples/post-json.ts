@@ -10,6 +10,7 @@ async function main() {
 
   console.log("Status:", response.statusCode);
   console.log("Response:", response.json());
+
 }
 
 main().catch(console.error);

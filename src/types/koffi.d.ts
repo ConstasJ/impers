@@ -17,6 +17,7 @@ declare module "koffi" {
     // Callback/function pointer support
     proto(signature: string): KoffiType;
     register(fn: unknown, type: KoffiType): unknown;
+    unregister(fn: unknown): void;
     callback(signature: string, fn: unknown): unknown;
 
     // Memory operations

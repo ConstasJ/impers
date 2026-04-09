@@ -1,16 +1,22 @@
 /**
  * WebSocket example
  *
- * This example connects to a public WebSocket echo server.
+ * Start the local echo server first:
+ *   npx tsx examples/ws-server.ts
+ *
+ * Then run this example:
+ *   npx tsx examples/websocket.ts
  */
 import { wsConnect, WebSocketMessageType } from "impers";
 
 async function main() {
+  const port = process.argv[2] || "8765";
+  const url = `ws://127.0.0.1:${port}/`;
+
   console.log("Connecting to WebSocket server...");
 
   try {
-    // Connect to a public WebSocket echo server
-    const ws = await wsConnect("wss://echo.websocket.org");
+    const ws = await wsConnect(url);
 
     console.log("Connected!");
     console.log("URL:", ws.url);
@@ -41,4 +47,4 @@ async function main() {
   }
 }
 
-main();
+main().catch(console.error);

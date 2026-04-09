@@ -138,12 +138,11 @@ async function main() {
     // Check if impersonation is available
     console.log(`   Impersonation support: ${Curl.hasImpersonateSupport()}`);
 
-    // You can apply fingerprints to the curl handle directly
-    // curl.setJa3(ja3Chrome);
-    // curl.setAkamai(akamaiChrome);
-    // curl.setExtraFingerprint(extraFp);
+    // Low-level browser impersonation is available directly on Curl.
+    // Prefer the high-level request/session APIs for JA3/Akamai configuration.
+    // curl.impersonate("chrome124");
 
-    console.log("   Fingerprint methods available on Curl class\n");
+    console.log("   Curl handle is ready for low-level impersonation use\n");
   } finally {
     curl.cleanup();
   }

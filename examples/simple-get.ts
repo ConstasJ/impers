@@ -16,6 +16,7 @@ async function main() {
   console.log("Status:", fp.statusCode);
   console.log("Fingerprints:");
   console.log(fp.text);
+
 }
 
 main().catch(console.error);

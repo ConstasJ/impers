@@ -17,6 +17,7 @@ import {
   curl_version,
   curl_version_info,
   hasImpersonateSupport,
+  koffi,
   type CurlHandle,
 } from "../ffi/libcurl.js";
 import { CurlOpt, CurlInfo, CurlCode, CurlVersion } from "../ffi/constants.js";
@@ -62,6 +63,26 @@ export class Curl {
 
     this._callbacks = [];
     this._slists = [];
+    this._buffers = [];
+  }
+
+  /**
+   * Release JS-side resources tied to the easy handle.
+   * Registered Koffi callbacks must be explicitly unregistered or they keep
+   * the process alive even after the curl handle is cleaned up.
+   */
+  private releaseResources(): void {
+    this._slists.forEach((list) => list.free());
+    this._slists = [];
+
+    for (const callback of this._callbacks) {
+      try {
+        koffi.unregister(callback as Parameters<typeof koffi.unregister>[0]);
+      } catch {
+        // Ignore callbacks that are already released or were never registered.
+      }
+    }
+    this._callbacks = [];
     this._buffers = [];
   }
 
@@ -305,11 +326,7 @@ export class Curl {
       throw new Error("Curl handle is null");
     }
 
-    // Free slists and clear callbacks
-    this._slists.forEach((list) => list.free());
-    this._slists = [];
-    this._callbacks = [];
-    this._buffers = [];
+    this.releaseResources();
 
     curl_easy_reset(this.handle);
   }
@@ -381,10 +398,7 @@ export class Curl {
    * Cleanup and release resources
    */
   cleanup(): void {
-    this._slists.forEach((list) => list.free());
-    this._slists = [];
-    this._callbacks = [];
-    this._buffers = [];
+    this.releaseResources();
 
     if (this.handle) {
       curl_easy_cleanup(this.handle);
