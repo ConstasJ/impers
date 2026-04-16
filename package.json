@@ -21,6 +21,14 @@
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lexiforest/impers.git"
+  },
+  "homepage": "https://github.com/lexiforest/impers#readme",
+  "bugs": {
+    "url": "https://github.com/lexiforest/impers/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "koffi": "^2.15.6"
