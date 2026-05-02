@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, readdirSync, statSync, symlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "fs";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import https from "node:https";
@@ -61,6 +70,9 @@ const SYSTEM_LIBCURL_SEARCH_PATHS: Record<string, string[]> = {
 };
 
 const LIB_PREFIX = "libcurl-impersonate";
+const CACHE_LOCK_POLL_MS = 100;
+const CACHE_LOCK_STALE_MS = 5 * 60 * 1000;
+const CACHE_LOCK_TIMEOUT_MS = 3 * 60 * 1000;
 const PLATFORM_LIB_EXT: Record<string, string> = {
   darwin: ".dylib",
   linux: ".so",
@@ -104,6 +116,57 @@ function getCacheRoot(): string | null {
 
 function getCacheDir(cacheRoot: string, platform: string, arch: string): string {
   return join(cacheRoot, `${platform}-${arch}`);
+}
+
+function getCacheLockDir(cacheRoot: string, platform: string, arch: string): string {
+  return join(cacheRoot, `${platform}-${arch}.lock`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withCacheLock<T>(
+  cacheRoot: string,
+  platform: string,
+  arch: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const lockDir = getCacheLockDir(cacheRoot, platform, arch);
+  const started = Date.now();
+  let locked = false;
+
+  while (!locked) {
+    try {
+      mkdirSync(lockDir);
+      writeFileSync(join(lockDir, "owner"), `${process.pid}\n`);
+      locked = true;
+    } catch {
+      let stale = false;
+      try {
+        stale = Date.now() - statSync(lockDir).mtimeMs > CACHE_LOCK_STALE_MS;
+      } catch {
+        stale = false;
+      }
+
+      if (stale) {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+
+      if (Date.now() - started > CACHE_LOCK_TIMEOUT_MS) {
+        throw new Error("Timed out waiting for libcurl cache lock");
+      }
+
+      await sleep(CACHE_LOCK_POLL_MS);
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    rmSync(lockDir, { recursive: true, force: true });
+  }
 }
 
 function uniquePaths(paths: string[]): string[] {
@@ -287,7 +350,13 @@ async function tryDownloadImpersonate(platform: string, arch: string): Promise<s
   mkdirSync(cacheRoot, { recursive: true });
 
   try {
-    return await downloadImpersonate(cacheRoot, platform, arch);
+    return await withCacheLock(cacheRoot, platform, arch, async () => {
+      const cachedAfterLock = findCachedLibrary(cacheRoot, platform, arch);
+      if (cachedAfterLock) {
+        return cachedAfterLock;
+      }
+      return await downloadImpersonate(cacheRoot, platform, arch);
+    });
   } catch {
     return findCachedLibrary(cacheRoot, platform, arch);
   }
@@ -335,6 +404,12 @@ function sanitizeArchivePath(name: string): string | null {
   return parts.join("/");
 }
 
+function writeFileAtomic(outPath: string, data: Buffer): void {
+  const tmpPath = `${outPath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmpPath, data);
+  renameSync(tmpPath, outPath);
+}
+
 function writeExtractedEntries(entries: ExtractedEntry[], targetDir: string, platform: string): void {
   const symlinks: Array<{ outPath: string; linkName: string }> = [];
 
@@ -363,7 +438,7 @@ function writeExtractedEntries(entries: ExtractedEntry[], targetDir: string, pla
       continue;
     }
 
-    writeFileSync(outPath, entry.data ?? Buffer.alloc(0));
+    writeFileAtomic(outPath, entry.data ?? Buffer.alloc(0));
   }
 
   if (platform === "win32") {
@@ -444,6 +519,11 @@ function pickAsset(assets: ReleaseAsset[], platform: string, arch: string): Rele
     : platform === "linux"
     ? ["linux"]
     : ["win", "windows"];
+  const platformExcludes = platform === "linux"
+    ? ["android"]
+    : platform === "darwin"
+    ? ["ios"]
+    : [];
   const archTokens = arch === "arm64"
     ? ["arm64", "aarch64"]
     : arch === "x64"
@@ -451,15 +531,54 @@ function pickAsset(assets: ReleaseAsset[], platform: string, arch: string): Rele
     : [arch];
 
   const matched = filtered.filter((asset) =>
-    hasAnyToken(asset.name!, platformTokens) && hasAnyToken(asset.name!, archTokens)
+    hasAnyToken(asset.name!, platformTokens) &&
+    hasAnyToken(asset.name!, archTokens) &&
+    !hasAnyToken(asset.name!, platformExcludes)
   );
-  const fallback = matched.length > 0
+  const platformMatched = matched.length > 0
     ? matched
-    : filtered.filter((asset) => hasAnyToken(asset.name!, platformTokens));
-  const pool = fallback.length > 0 ? fallback : filtered;
+    : filtered.filter((asset) =>
+      hasAnyToken(asset.name!, platformTokens) &&
+      !hasAnyToken(asset.name!, platformExcludes)
+    );
+
+  const abiMatched = platform === "linux"
+    ? preferLinuxAbi(platformMatched)
+    : platformMatched;
+  const pool = abiMatched.length > 0 ? abiMatched : filtered;
 
   pool.sort((a, b) => rankByExt(a.name!, platform) - rankByExt(b.name!, platform));
   return pool[0] || null;
+}
+
+function preferLinuxAbi(assets: ReleaseAsset[]): ReleaseAsset[] {
+  const libc = getLinuxLibc();
+  const preferredAbi = libc === "musl" ? "linux-musl" : "linux-gnu";
+  const preferred = assets.filter((asset) => asset.name!.toLowerCase().includes(preferredAbi));
+  if (preferred.length > 0) {
+    return preferred;
+  }
+
+  const gnuOrMusl = assets.filter((asset) => {
+    const name = asset.name!.toLowerCase();
+    return name.includes("linux-gnu") || name.includes("linux-musl");
+  });
+  return gnuOrMusl.length > 0 ? gnuOrMusl : assets;
+}
+
+function getLinuxLibc(): "gnu" | "musl" | null {
+  if (process.platform !== "linux") {
+    return null;
+  }
+
+  const report = process.report?.getReport() as {
+    header?: { glibcVersionRuntime?: string };
+  } | undefined;
+  if (report?.header?.glibcVersionRuntime) {
+    return "gnu";
+  }
+
+  return "musl";
 }
 
 function rankByExt(name: string, platform: string): number {

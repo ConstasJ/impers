@@ -3,17 +3,25 @@ import {
   curl_multi_cleanup,
   curl_multi_add_handle,
   curl_multi_remove_handle,
-  curl_multi_perform,
-  curl_multi_poll,
+  curl_multi_socket_action,
   curl_multi_info_read,
   curl_multi_setopt_long,
+  curl_multi_setopt_ptr,
   curl_multi_strerror,
+  koffi,
   getHandleAddress,
   type CurlMultiHandle,
   type CurlHandle,
-  type MultiInfoMessage,
 } from "../ffi/libcurl.js";
-import { CurlMCode, CurlMOpt, CurlMsg, CurlCode } from "../ffi/constants.js";
+import {
+  CurlMCode,
+  CurlMOpt,
+  CurlMsg,
+  CurlCode,
+  CurlPoll,
+  CurlCSelect,
+  CURL_SOCKET_TIMEOUT,
+} from "../ffi/constants.js";
 import type { Curl } from "./easy.js";
 
 export interface MultiOptions {
@@ -35,10 +43,35 @@ export interface TransferResult {
   code: number;
 }
 
+type PollEvents = {
+  readable: boolean;
+  writable: boolean;
+  disconnect: boolean;
+};
+
+type PollHandle = ReturnType<typeof koffi.node.poll>;
+const SOCKET_ACTION_FALLBACK_MS = 100;
+const CURLPIPE_NOTHING = 0;
+const CURLPIPE_MULTIPLEX = 2;
+const koffiTypeSuffix = `${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+const SocketCallbackProto = koffi.proto(
+  `int CurlMultiSocketCallback_${koffiTypeSuffix}(void *, int, int, void *, void *)`
+);
+const TimerCallbackProto = koffi.proto(
+  `int CurlMultiTimerCallback_${koffiTypeSuffix}(void *, long, void *)`
+);
+
+function debugMulti(message: string): void {
+  if (process.env.IMPERS_DEBUG_TESTS === "1") {
+    console.log(`[curl-multi] ${message}`);
+  }
+}
+
 /**
  * CurlMulti - Async multi-handle interface for concurrent requests
  *
- * Uses poll-based async to integrate with Node.js event loop.
+ * Uses libcurl's socket action API to integrate with Node.js' event loop.
  * This allows multiple HTTP requests to run concurrently without blocking.
  */
 export class CurlMulti {
@@ -46,7 +79,11 @@ export class CurlMulti {
   private pendingTransfers: Map<string, PendingTransfer> = new Map(); // keyed by handle address
   private curlToAddr: Map<Curl, string> = new Map();
   private polling: boolean = false;
-  private pollTimer: ReturnType<typeof setImmediate> | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private socketPolls: Map<number, PollHandle> = new Map();
+  private socketCallback: unknown | null = null;
+  private timerCallback: unknown | null = null;
   private closed: boolean = false;
 
   constructor(options: MultiOptions = {}) {
@@ -66,9 +103,12 @@ export class CurlMulti {
       this.setOptLong(CurlMOpt.CURLMOPT_MAX_TOTAL_CONNECTIONS, options.maxTotalConnections);
     }
     if (options.pipelining !== undefined) {
-      // 2 = CURLPIPE_MULTIPLEX for HTTP/2 multiplexing
-      this.setOptLong(CurlMOpt.CURLMOPT_PIPELINING, options.pipelining ? 2 : 0);
+      this.setOptLong(
+        CurlMOpt.CURLMOPT_PIPELINING,
+        options.pipelining ? CURLPIPE_MULTIPLEX : CURLPIPE_NOTHING
+      );
     }
+
   }
 
   private setOptLong(option: number, value: number): void {
@@ -77,6 +117,55 @@ export class CurlMulti {
     if (code !== CurlMCode.CURLM_OK) {
       throw new Error(`curl_multi_setopt failed: ${curl_multi_strerror(code)}`);
     }
+  }
+
+  private setOptPtr(option: number, value: unknown): void {
+    if (!this.handle) return;
+    const code = curl_multi_setopt_ptr(this.handle, option, value);
+    if (code !== CurlMCode.CURLM_OK) {
+      throw new Error(`curl_multi_setopt failed: ${curl_multi_strerror(code)}`);
+    }
+  }
+
+  private ensureSocketCallbacks(): void {
+    if (this.socketCallback || this.timerCallback) {
+      return;
+    }
+
+    this.socketCallback = koffi.register(
+      (
+        _easy: unknown,
+        socket: number,
+        what: number,
+        clientp: unknown,
+        socketp: unknown
+      ) => {
+        void clientp;
+        void socketp;
+        try {
+          return this.updateSocketPoll(socket, what);
+        } catch (error) {
+          this.failFromCallback("socket callback", error);
+          return -1;
+        }
+      },
+      koffi.pointer(SocketCallbackProto)
+    );
+    this.timerCallback = koffi.register(
+      (_multi: unknown, timeoutMs: number, clientp: unknown) => {
+        void clientp;
+        try {
+          return this.updateTimer(timeoutMs);
+        } catch (error) {
+          this.failFromCallback("timer callback", error);
+          return -1;
+        }
+      },
+      koffi.pointer(TimerCallbackProto)
+    );
+
+    this.setOptPtr(CurlMOpt.CURLMOPT_SOCKETFUNCTION, this.socketCallback);
+    this.setOptPtr(CurlMOpt.CURLMOPT_TIMERFUNCTION, this.timerCallback);
   }
 
   /**
@@ -99,10 +188,14 @@ export class CurlMulti {
     return new Promise<TransferResult>((resolve, reject) => {
       // Get the handle address for lookup
       const handleAddr = getHandleAddress(easyHandle);
+      debugMulti(`add handle=${handleAddr} pending=${this.pendingTransfers.size}`);
+
+      this.ensureSocketCallbacks();
 
       // Add to multi handle
       const code = curl_multi_add_handle(this.handle!, easyHandle);
       if (code !== CurlMCode.CURLM_OK) {
+        this.stopPolling();
         reject(new Error(`curl_multi_add_handle failed: ${curl_multi_strerror(code)}`));
         return;
       }
@@ -112,7 +205,6 @@ export class CurlMulti {
       this.pendingTransfers.set(handleAddr, transfer);
       this.curlToAddr.set(curl, handleAddr);
 
-      // Start polling if not already
       this.startPolling();
     });
   }
@@ -121,51 +213,184 @@ export class CurlMulti {
    * Start the poll loop if not already running
    */
   private startPolling(): void {
-    if (this.polling || this.closed) return;
+    if (this.closed) return;
     this.polling = true;
-    this.pollLoop();
+    debugMulti(`start pending=${this.pendingTransfers.size}`);
+    this.scheduleFallbackTimer();
+    this.processData(CURL_SOCKET_TIMEOUT, CurlPoll.CURL_POLL_NONE);
   }
 
   /**
-   * Main poll loop - runs via setImmediate to avoid blocking
+   * Drive libcurl after a socket or timeout event.
    */
-  private pollLoop(): void {
+  private runSocketAction(socket: number, events: number): void {
     if (this.closed || !this.handle || this.pendingTransfers.size === 0) {
-      this.polling = false;
+      debugMulti(`skip action socket=${socket} events=${events} pending=${this.pendingTransfers.size}`);
+      this.stopPolling();
       return;
     }
 
-    // Perform any ready transfers
-    const { code: performCode, runningHandles } = curl_multi_perform(this.handle);
+    const { code, runningHandles } = curl_multi_socket_action(this.handle, socket, events);
+    debugMulti(
+      `action socket=${socket} events=${events} code=${code} running=${runningHandles} pending=${this.pendingTransfers.size}`
+    );
 
-    if (performCode !== CurlMCode.CURLM_OK && performCode !== CurlMCode.CURLM_CALL_MULTI_PERFORM) {
-      // Error - fail all pending transfers
-      const error = new Error(`curl_multi_perform failed: ${curl_multi_strerror(performCode)}`);
+    if (code !== CurlMCode.CURLM_OK && code !== CurlMCode.CURLM_CALL_MULTI_PERFORM) {
+      const error = new Error(`curl_multi_socket_action failed: ${curl_multi_strerror(code)}`);
       this.failAllPending(error);
-      this.polling = false;
+      this.stopPolling();
       return;
     }
 
-    // Check for completed transfers
     this.checkCompleted();
 
-    // If there are still running handles, continue polling
-    if (runningHandles > 0 || this.pendingTransfers.size > 0) {
-      // Use curl_multi_poll to wait for activity (with 10ms timeout)
-      const { code: pollCode } = curl_multi_poll(this.handle, 10);
+    if (runningHandles === 0 && this.pendingTransfers.size === 0) {
+      this.stopPolling();
+    }
+  }
 
-      if (pollCode !== CurlMCode.CURLM_OK) {
-        const error = new Error(`curl_multi_poll failed: ${curl_multi_strerror(pollCode)}`);
-        this.failAllPending(error);
-        this.polling = false;
+  private processData(socket: number, events: number): void {
+    try {
+      this.runSocketAction(socket, events);
+    } catch (error) {
+      this.failFromCallback("socket action", error);
+    }
+  }
+
+  private updateSocketPoll(socket: number, what: number): number {
+    debugMulti(`socket callback socket=${socket} what=${what}`);
+    if (this.closed) {
+      this.closeSocketPoll(socket);
+      return 0;
+    }
+
+    try {
+      const existing = this.socketPolls.get(socket);
+      if (existing) {
+        existing.stop();
+      }
+
+      if (what === CurlPoll.CURL_POLL_REMOVE || what === CurlPoll.CURL_POLL_NONE) {
+        this.closeSocketPoll(socket);
+        return 0;
+      }
+
+      const readable = what === CurlPoll.CURL_POLL_IN || what === CurlPoll.CURL_POLL_INOUT;
+      const writable = what === CurlPoll.CURL_POLL_OUT || what === CurlPoll.CURL_POLL_INOUT;
+      const opts = { readable, writable, disconnect: true };
+      if (existing) {
+        existing.start(opts, (status, events) => this.onSocketEvent(socket, status, events));
+      } else {
+        const poll = koffi.node.poll(
+          socket,
+          opts,
+          (status, events) => this.onSocketEvent(socket, status, events)
+        );
+        this.socketPolls.set(socket, poll);
+      }
+      debugMulti(`watch socket=${socket} readable=${readable} writable=${writable}`);
+      return 0;
+    } catch (error) {
+      debugMulti(`watch failed socket=${socket}: ${error instanceof Error ? error.message : String(error)}`);
+      return -1;
+    }
+  }
+
+  private onSocketEvent(socket: number, status: number, events: PollEvents): void {
+    if (this.closed) return;
+    debugMulti(
+      `event socket=${socket} status=${status} readable=${events.readable} writable=${events.writable} disconnect=${events.disconnect}`
+    );
+
+    let eventMask = 0;
+    if (events.readable) {
+      eventMask |= CurlCSelect.CURL_CSELECT_IN;
+    }
+    if (events.writable) {
+      eventMask |= CurlCSelect.CURL_CSELECT_OUT;
+    }
+    if (events.disconnect || status < 0) {
+      eventMask |= CurlCSelect.CURL_CSELECT_ERR;
+    }
+
+    if (eventMask !== 0) {
+      this.processData(socket, eventMask);
+    }
+  }
+
+  private updateTimer(timeoutMs: number): number {
+    this.clearTimer();
+    debugMulti(`timer callback timeout=${timeoutMs}`);
+
+    if (this.closed || timeoutMs < 0) {
+      return 0;
+    }
+
+    // Do not call libcurl recursively from inside the timer callback.
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      debugMulti("timer fired");
+      this.processData(CURL_SOCKET_TIMEOUT, CurlPoll.CURL_POLL_NONE);
+    }, Math.max(0, timeoutMs));
+    return 0;
+  }
+
+  private clearTimer(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+
+  private scheduleFallbackTimer(): void {
+    if (this.fallbackTimer || this.closed || this.pendingTransfers.size === 0) {
+      return;
+    }
+
+    this.fallbackTimer = setTimeout(() => {
+      this.fallbackTimer = null;
+      if (this.closed || this.pendingTransfers.size === 0) {
         return;
       }
 
-      // Schedule next iteration
-      this.pollTimer = setImmediate(() => this.pollLoop());
-    } else {
-      this.polling = false;
+      debugMulti("fallback fired");
+      this.processData(CURL_SOCKET_TIMEOUT, CurlPoll.CURL_POLL_NONE);
+      this.scheduleFallbackTimer();
+    }, SOCKET_ACTION_FALLBACK_MS);
+  }
+
+  private clearFallbackTimer(): void {
+    if (this.fallbackTimer) {
+      clearTimeout(this.fallbackTimer);
+      this.fallbackTimer = null;
     }
+  }
+
+  private closeSocketPoll(socket: number): void {
+    const poll = this.socketPolls.get(socket);
+    if (!poll) {
+      return;
+    }
+
+    try {
+      poll.close();
+    } catch {
+      // Ignore poll handles already closed by libuv/Koffi.
+    }
+    this.socketPolls.delete(socket);
+  }
+
+  private closeAllSocketPolls(): void {
+    for (const socket of this.socketPolls.keys()) {
+      this.closeSocketPoll(socket);
+    }
+  }
+
+  private stopPolling(): void {
+    this.polling = false;
+    this.clearTimer();
+    this.clearFallbackTimer();
+    this.closeAllSocketPolls();
   }
 
   /**
@@ -191,6 +416,7 @@ export class CurlMulti {
         const pending = this.findPendingByHandle(msg.easyHandle);
 
         if (pending) {
+          debugMulti(`done handle=${pending.handleAddr} result=${msg.result}`);
           // Remove from multi handle
           curl_multi_remove_handle(this.handle, pending.handle);
           this.pendingTransfers.delete(pending.handleAddr);
@@ -223,6 +449,17 @@ export class CurlMulti {
     this.curlToAddr.clear();
   }
 
+  private failFromCallback(context: string, error: unknown): void {
+    const reason = error instanceof Error ? error : new Error(String(error));
+    const wrapped = new Error(`${context} failed: ${reason.message}`);
+    if (reason.stack) {
+      wrapped.stack = reason.stack;
+    }
+    debugMulti(wrapped.message);
+    this.failAllPending(wrapped);
+    this.stopPolling();
+  }
+
   /**
    * Cancel a specific transfer
    */
@@ -239,6 +476,10 @@ export class CurlMulti {
     this.pendingTransfers.delete(handleAddr);
     this.curlToAddr.delete(curl);
     pending.reject(new Error("Transfer cancelled"));
+
+    if (this.pendingTransfers.size === 0) {
+      this.stopPolling();
+    }
 
     return true;
   }
@@ -264,20 +505,34 @@ export class CurlMulti {
     if (this.closed) return;
     this.closed = true;
 
-    // Cancel poll timer
-    if (this.pollTimer) {
-      clearImmediate(this.pollTimer);
-      this.pollTimer = null;
-    }
-
     // Fail all pending transfers
     this.failAllPending(new Error("CurlMulti closed"));
+    this.stopPolling();
 
     // Cleanup multi handle
     if (this.handle) {
+      this.setOptPtr(CurlMOpt.CURLMOPT_SOCKETFUNCTION, null);
+      this.setOptPtr(CurlMOpt.CURLMOPT_TIMERFUNCTION, null);
       curl_multi_cleanup(this.handle);
       this.handle = null;
     }
+
+    this.releaseCallbacks();
+  }
+
+  private releaseCallbacks(): void {
+    for (const callback of [this.socketCallback, this.timerCallback]) {
+      if (!callback) {
+        continue;
+      }
+      try {
+        koffi.unregister(callback as Parameters<typeof koffi.unregister>[0]);
+      } catch {
+        // Ignore callbacks already released during shutdown.
+      }
+    }
+    this.socketCallback = null;
+    this.timerCallback = null;
   }
 }
 

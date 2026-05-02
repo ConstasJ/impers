@@ -1,4 +1,4 @@
-name: Test
+name: Test on Ubuntu
 
 on:
   push:
@@ -12,13 +12,24 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22, 24]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ matrix.node-version }}
       - run: npm ci
-      - run: npm test
+      - run: npm run test:ci
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: node-diagnostic-reports
+          path: reports/
+          if-no-files-found: ignore
