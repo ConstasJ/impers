@@ -96,7 +96,6 @@ export class CurlMulti {
       this.setOptLong(CurlMOpt.CURLMOPT_PIPELINING, options.pipelining ? 2 : 0);
     }
 
-    this.configureSocketCallbacks();
   }
 
   private setOptLong(option: number, value: number): void {
@@ -115,7 +114,11 @@ export class CurlMulti {
     }
   }
 
-  private configureSocketCallbacks(): void {
+  private ensureSocketCallbacks(): void {
+    if (this.socketCallback || this.timerCallback) {
+      return;
+    }
+
     this.socketCallback = koffi.register(
       (_easy: unknown, socket: number, what: number) => this.updateSocketPoll(socket, what),
       koffi.pointer(SocketCallbackProto)
@@ -150,9 +153,12 @@ export class CurlMulti {
       // Get the handle address for lookup
       const handleAddr = getHandleAddress(easyHandle);
 
+      this.ensureSocketCallbacks();
+
       // Add to multi handle
       const code = curl_multi_add_handle(this.handle!, easyHandle);
       if (code !== CurlMCode.CURLM_OK) {
+        this.stopPolling();
         reject(new Error(`curl_multi_add_handle failed: ${curl_multi_strerror(code)}`));
         return;
       }
@@ -295,6 +301,12 @@ export class CurlMulti {
     this.polling = false;
     this.clearTimer();
     this.closeAllSocketPolls();
+
+    if (this.handle && this.pendingTransfers.size === 0) {
+      this.setOptPtr(CurlMOpt.CURLMOPT_SOCKETFUNCTION, null);
+      this.setOptPtr(CurlMOpt.CURLMOPT_TIMERFUNCTION, null);
+      this.releaseCallbacks();
+    }
   }
 
   /**
