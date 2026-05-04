@@ -1,10 +1,17 @@
+import { createRequire } from "node:module";
 import { themes as prismThemes } from "prism-react-renderer";
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
 
+const require = createRequire(import.meta.url);
+const { version: packageVersion } = require("../package.json") as { version: string };
+
 const config: Config = {
   title: "impers",
   tagline: "Node.js binding for libcurl, with browser impersonation",
+  customFields: {
+    packageVersion,
+  },
 
   url: "https://lexiforest.github.io",
   baseUrl: "/impers/",
@@ -65,9 +72,21 @@ const config: Config = {
   ],
 
   themeConfig: {
+    announcementBar: {
+      id: `version-${packageVersion}`,
+      content: `These docs are built from <code>impers</code> v${packageVersion} on <code>main</code>. APIs are provisional and may change between versions.`,
+      backgroundColor: "#fff8c5",
+      textColor: "#1f2328",
+      isCloseable: true,
+    },
     navbar: {
       title: "impers",
       items: [
+        {
+          type: "html",
+          position: "right",
+          value: `<span class="navbar__version-badge">v${packageVersion}</span>`,
+        },
         {
           type: "docSidebar",
           sidebarId: "docsSidebar",
