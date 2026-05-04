@@ -20,7 +20,9 @@
     "lint": "eslint .",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
     "test:ci": "mkdir -p reports && IMPERS_DEBUG_TESTS=1 NODE_OPTIONS='--experimental-vm-modules --enable-source-maps --trace-uncaught --trace-warnings --report-on-fatalerror --report-on-signal --report-signal=SIGSEGV --report-uncaught-exception --report-directory=reports' jest --maxWorkers=4 --verbose",
-    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch"
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
+    "docs:dev": "npm --prefix docs install && npm --prefix docs run start",
+    "docs:build": "npm --prefix docs install && npm --prefix docs run build"
   },
   "repository": {
     "type": "git",

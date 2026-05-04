@@ -4,3 +4,9 @@ node_modules/
 .claude
 *.tgz
 curl_cffi
+
+# Docs site (Docusaurus + TypeDoc)
+docs/.docusaurus/
+docs/build/
+docs/node_modules/
+docs/docs/api/
