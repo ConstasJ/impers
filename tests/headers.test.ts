@@ -146,6 +146,12 @@ describe("Headers", () => {
       const curlHeaders = headers.toCurlHeaders();
       expect(curlHeaders.filter((h) => h.startsWith("Accept:"))).toHaveLength(2);
     });
+
+    it("should preserve empty values with curl's empty-header syntax", () => {
+      const headers = new Headers({ "X-Name": "" });
+      expect(headers.get("x-name")).toBe("");
+      expect(headers.toCurlHeaders()).toContain("X-Name;");
+    });
   });
 
   describe("fromRaw", () => {

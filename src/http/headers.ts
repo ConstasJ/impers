@@ -165,7 +165,11 @@ export class Headers implements Iterable<[string, string]> {
   toCurlHeaders(): string[] {
     const result: string[] = [];
     for (const [name, value] of this.entries()) {
-      result.push(`${name}: ${value}`);
+      if (value === "") {
+        result.push(`${name};`);
+      } else {
+        result.push(`${name}: ${value}`);
+      }
     }
     return result;
   }
@@ -175,7 +179,7 @@ export class Headers implements Iterable<[string, string]> {
    */
   toObject(): Record<string, string> {
     const result: Record<string, string> = {};
-    for (const [key, values] of this.data) {
+    for (const values of this.data.values()) {
       if (values.length > 0) {
         result[values[0][0]] = values[0][1];
       }

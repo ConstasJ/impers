@@ -41,6 +41,14 @@ describe("Session", () => {
       const json = resp.json() as { headers: Record<string, string> };
       expect(json.headers["x-custom-header"]).toBe("test-value");
     });
+
+    it("should include custom headers with empty values", async () => {
+      const resp = await session.get(`${globalThis.TEST_SERVER_URL}/headers`, {
+        headers: { "X-Name": "" },
+      });
+      const json = resp.json() as { headers: Record<string, string> };
+      expect(json.headers).toHaveProperty("x-name", "");
+    });
   });
 
   describe("POST requests", () => {
