@@ -8,6 +8,7 @@ import {
   curl_multi_setopt_long,
   curl_multi_setopt_ptr,
   curl_multi_strerror,
+  curl_easy_strerror,
   koffi,
   getHandleAddress,
   type CurlMultiHandle,
@@ -23,6 +24,7 @@ import {
   CURL_SOCKET_TIMEOUT,
 } from "../ffi/constants.js";
 import type { Curl } from "./easy.js";
+import { mapCurlError } from "../utils/errors.js";
 
 export interface MultiOptions {
   maxConnections?: number;
@@ -426,7 +428,8 @@ export class CurlMulti {
           if (msg.result === CurlCode.CURLE_OK) {
             pending.resolve({ code: msg.result });
           } else {
-            pending.reject(new Error(`Transfer failed with code ${msg.result}`));
+            const message = curl_easy_strerror(msg.result) as string | null;
+            pending.reject(mapCurlError(msg.result, message || undefined));
           }
         }
       }

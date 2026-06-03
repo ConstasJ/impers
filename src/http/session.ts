@@ -4,7 +4,7 @@
 
 import { Curl } from "../core/easy.js";
 import { CurlMulti, getSharedMulti } from "../core/multi.js";
-import { CurlOpt, CurlHttpVersion, CurlAuth } from "../ffi/constants.js";
+import { CurlOpt, CurlHttpVersion, CurlAuth, CurlSslOpt } from "../ffi/constants.js";
 import { Headers } from "./headers.js";
 import { Cookies } from "./cookies.js";
 import { Response } from "./response.js";
@@ -803,6 +803,16 @@ export class Session {
     } else {
       curl.setOpt(CurlOpt.SSL_VERIFYPEER, 1);
       curl.setOpt(CurlOpt.SSL_VERIFYHOST, 2);
+
+      if (process.platform === "win32" && !options.caCert) {
+        try {
+          curl.setOpt(CurlOpt.SSL_OPTIONS, CurlSslOpt.CURLSSLOPT_NATIVE_CA);
+          curl.setOpt(CurlOpt.PROXY_SSL_OPTIONS, CurlSslOpt.CURLSSLOPT_NATIVE_CA);
+        } catch {
+          // Some libcurl/SSL backend combinations cannot use the Windows CA store.
+          // Users can still pass caCert to provide an explicit bundle.
+        }
+      }
     }
 
     // CA certificate
