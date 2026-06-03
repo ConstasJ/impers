@@ -3,7 +3,7 @@
  */
 import { Session } from "../src/http/session.js";
 import { Headers } from "../src/http/headers.js";
-import { get, post, put, del, patch } from "../src/public.js";
+import { AbortError, get, post, put, del, patch } from "../src/public.js";
 
 describe("Session", () => {
   let session: Session;
@@ -48,6 +48,46 @@ describe("Session", () => {
       });
       const json = resp.json() as { headers: Record<string, string> };
       expect(json.headers).toHaveProperty("x-name", "");
+    });
+  });
+
+  describe("Cancellation", () => {
+    it("should reject immediately when the signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort("already aborted");
+
+      await expect(
+        session.get(`${globalThis.TEST_SERVER_URL}/delay/1`, {
+          signal: controller.signal,
+        })
+      ).rejects.toMatchObject({
+        name: "AbortError",
+        message: "already aborted",
+      });
+    });
+
+    it("should abort an in-flight request", async () => {
+      const controller = new AbortController();
+      const request = session.get(`${globalThis.TEST_SERVER_URL}/delay/2`, {
+        signal: controller.signal,
+      });
+
+      setTimeout(() => controller.abort("stop transfer"), 50);
+
+      await expect(request).rejects.toBeInstanceOf(AbortError);
+    });
+
+    it("should not cancel other concurrent requests", async () => {
+      const controller = new AbortController();
+      const aborted = session.get(`${globalThis.TEST_SERVER_URL}/delay/2`, {
+        signal: controller.signal,
+      });
+      const completed = session.get(`${globalThis.TEST_SERVER_URL}/delay/0.1`);
+
+      setTimeout(() => controller.abort(), 50);
+
+      await expect(aborted).rejects.toBeInstanceOf(AbortError);
+      await expect(completed).resolves.toMatchObject({ statusCode: 200 });
     });
   });
 

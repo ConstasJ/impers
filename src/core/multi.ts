@@ -463,7 +463,7 @@ export class CurlMulti {
   /**
    * Cancel a specific transfer
    */
-  cancel(curl: Curl): boolean {
+  cancel(curl: Curl, error: Error = new Error("Transfer cancelled")): boolean {
     if (!this.handle) return false;
 
     const handleAddr = this.curlToAddr.get(curl);
@@ -475,7 +475,7 @@ export class CurlMulti {
     curl_multi_remove_handle(this.handle, pending.handle);
     this.pendingTransfers.delete(handleAddr);
     this.curlToAddr.delete(curl);
-    pending.reject(new Error("Transfer cancelled"));
+    pending.reject(error);
 
     if (this.pendingTransfers.size === 0) {
       this.stopPolling();

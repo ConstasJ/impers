@@ -5,16 +5,14 @@
 import { Curl } from "../core/easy.js";
 import { CurlMulti, getSharedMulti } from "../core/multi.js";
 import { CurlOpt, CurlHttpVersion, CurlAuth } from "../ffi/constants.js";
-import { Headers, type HeadersInit } from "./headers.js";
-import { Cookies, type CookiesInit, type Cookie } from "./cookies.js";
+import { Headers } from "./headers.js";
+import { Cookies } from "./cookies.js";
 import { Response } from "./response.js";
 import { SList } from "../core/slist.js";
 import { CurlMime } from "../core/mime.js";
 import {
+  AbortError,
   SessionClosed,
-  HTTPError,
-  InvalidURL,
-  mapCurlError,
 } from "../utils/errors.js";
 import {
   setJa3Options,
@@ -33,7 +31,6 @@ import type {
   BasicAuth,
   DigestAuth,
   BearerAuth,
-  AuthType,
   CertConfig,
   MultipartField,
 } from "../types/options.js";
@@ -75,7 +72,13 @@ export class Session {
     this._baseUrl = options.baseUrl || null;
 
     // Store remaining defaults
-    const { cookies, headers, baseUrl, maxConnections, maxHostConnections, http2Multiplexing, ...defaults } = options;
+    const defaults = { ...options };
+    delete defaults.cookies;
+    delete defaults.headers;
+    delete defaults.baseUrl;
+    delete defaults.maxConnections;
+    delete defaults.maxHostConnections;
+    delete defaults.http2Multiplexing;
     this._defaults = defaults;
   }
 
@@ -106,21 +109,35 @@ export class Session {
 
     // Merge options with session defaults
     const mergedOptions = this.mergeOptions(options);
+    const signal = mergedOptions.signal;
+
+    if (signal?.aborted) {
+      throw new AbortError(signal.reason);
+    }
 
     // Create curl handle
     const curl = new Curl();
     const slists: SList[] = [];
     const mimes: CurlMime[] = [];
+    let abortHandler: (() => void) | undefined;
+    let inCurlCallback = false;
+
+    const removeAbortHandler = (): void => {
+      if (signal && abortHandler) {
+        signal.removeEventListener("abort", abortHandler);
+        abortHandler = undefined;
+      }
+    };
 
     try {
       // Set URL
       curl.setOpt(CurlOpt.URL, resolvedUrl);
 
       // Set method
-      this.setMethod(curl, method.toUpperCase(), mergedOptions);
+      this.setMethod(curl, method.toUpperCase());
 
       // Set headers
-      const headerList = this.buildHeaders(method, mergedOptions, resolvedUrl);
+      const headerList = this.buildHeaders(mergedOptions);
       if (headerList.length > 0) {
         const slist = new SList();
         headerList.forEach((h) => slist.append(h));
@@ -179,24 +196,71 @@ export class Session {
       const headerChunks: Buffer[] = [];
 
       curl.setWriteFunction((chunk) => {
-        if (mergedOptions.contentCallback) {
-          mergedOptions.contentCallback(chunk);
+        if (signal?.aborted) {
+          return 0;
         }
-        if (!mergedOptions.stream) {
-          bodyChunks.push(Buffer.from(chunk));
+
+        inCurlCallback = true;
+        try {
+          if (mergedOptions.contentCallback) {
+            mergedOptions.contentCallback(chunk);
+          }
+          if (signal?.aborted) {
+            return 0;
+          }
+          if (!mergedOptions.stream) {
+            bodyChunks.push(Buffer.from(chunk));
+          }
+        } finally {
+          inCurlCallback = false;
         }
       });
 
       curl.setHeaderFunction((chunk) => {
-        if (mergedOptions.headerCallback) {
-          mergedOptions.headerCallback(chunk);
+        if (signal?.aborted) {
+          return 0;
         }
-        headerChunks.push(Buffer.from(chunk));
+
+        inCurlCallback = true;
+        try {
+          if (mergedOptions.headerCallback) {
+            mergedOptions.headerCallback(chunk);
+          }
+          if (signal?.aborted) {
+            return 0;
+          }
+          headerChunks.push(Buffer.from(chunk));
+        } finally {
+          inCurlCallback = false;
+        }
       });
 
       // Perform request
+      if (signal) {
+        abortHandler = () => {
+          const error = new AbortError(signal.reason);
+          if (!inCurlCallback) {
+            this.multi.cancel(curl, error);
+          }
+        };
+        signal.addEventListener("abort", abortHandler, { once: true });
+
+        if (signal.aborted) {
+          throw new AbortError(signal.reason);
+        }
+      }
+
       const startTime = Date.now();
-      await this.multi.perform(curl);
+      try {
+        await this.multi.perform(curl);
+      } catch (error) {
+        if (signal?.aborted) {
+          throw error instanceof AbortError ? error : new AbortError(signal.reason);
+        }
+        throw error;
+      } finally {
+        removeAbortHandler();
+      }
       const elapsed = (Date.now() - startTime) / 1000;
 
       const rawHeaders: Buffer = Buffer.concat(headerChunks);
@@ -273,6 +337,7 @@ export class Session {
       return response;
     } finally {
       // Cleanup
+      removeAbortHandler();
       slists.forEach((s) => s.free());
       mimes.forEach((m) => m.free());
       curl.cleanup();
@@ -439,7 +504,7 @@ export class Session {
   /**
    * Set HTTP method
    */
-  private setMethod(curl: Curl, method: string, options: RequestOptions): void {
+  private setMethod(curl: Curl, method: string): void {
     switch (method) {
       case "GET":
         curl.setOpt(CurlOpt.HTTPGET, 1);
@@ -470,7 +535,7 @@ export class Session {
   /**
    * Build headers list for curl
    */
-  private buildHeaders(method: string, options: RequestOptions, url: string): string[] {
+  private buildHeaders(options: RequestOptions): string[] {
     const headers = new Headers();
 
     // Add session headers first
@@ -845,13 +910,10 @@ export class Session {
    * Set browser impersonation and fingerprinting options
    */
   private setImpersonation(curl: Curl, options: RequestOptions): void {
-    let impersonateApplied = false;
-
     // First, try to apply browser impersonation if specified
     if (options.impersonate) {
       try {
         curl.impersonate(options.impersonate, options.defaultHeaders !== false);
-        impersonateApplied = true;
       } catch {
         // Impersonation not available (using standard libcurl)
         // Fall through to manual fingerprinting if ja3/akamai provided

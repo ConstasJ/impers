@@ -15,6 +15,25 @@ export class RequestException extends Error {
 }
 
 /**
+ * Request aborted by an AbortSignal
+ */
+export class AbortError extends RequestException {
+  reason?: unknown;
+
+  constructor(reason?: unknown) {
+    const message =
+      reason instanceof Error
+        ? reason.message
+        : typeof reason === "string"
+          ? reason
+          : "Request aborted";
+    super(message, reason instanceof Error ? reason : undefined);
+    this.name = "AbortError";
+    this.reason = reason;
+  }
+}
+
+/**
  * libcurl error with error code
  */
 export class CurlError extends RequestException {

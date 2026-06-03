@@ -117,6 +117,8 @@ export interface RequestOptions {
   connectTimeout?: number;
   /** Read timeout in seconds (same as timeout for simplicity) */
   readTimeout?: number;
+  /** Abort signal for request cancellation */
+  signal?: AbortSignal;
 
   // Redirects
   /** Follow redirects (default: true) */
@@ -194,7 +196,7 @@ export interface RequestOptions {
 /**
  * Session options - configure default behavior for all requests
  */
-export interface SessionOptions extends Omit<RequestOptions, "params" | "data" | "json" | "multipart" | "content" | "files"> {
+export interface SessionOptions extends Omit<RequestOptions, "params" | "data" | "json" | "multipart" | "content" | "files" | "signal"> {
   // Session-specific
   /** Base URL for all requests */
   baseUrl?: string;

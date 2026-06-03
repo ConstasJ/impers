@@ -210,6 +210,7 @@ export type { CookiesInit, Cookie, CookieOptions } from "./http/cookies.js";
 // Export errors
 export {
   RequestException,
+  AbortError,
   CurlError,
   ConnectionError,
   DNSError,
